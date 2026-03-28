@@ -1,8 +1,18 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router';
 import { useAuth, UserRole } from '../../context/AuthContext';
 import { UserCircle2, Truck, CheckCircle2, ArrowRight, Recycle, MapPin, Bell, Route, BarChart3, Wrench } from 'lucide-react';
-import { signup as apiSignup } from '../../services/authService';
+import { signup as apiSignup, getPublicDrivers } from '../../services/authService';
+import L from 'leaflet';
+import "leaflet/dist/leaflet.css";
+
+// Fix Leaflet default icon paths
+delete (L.Icon.Default.prototype as any)._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
+  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+});
 
 const roles: {
   value: UserRole;
@@ -50,6 +60,12 @@ const roles: {
 export default function RoleSelection() {
   const [selectedRole, setSelectedRole] = useState<UserRole>('user');
   const [isLoading, setIsLoading] = useState(false);
+  const [pickedLocation, setPickedLocation] = useState<{lat: number, lng: number} | null>(null);
+  
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapInstanceRef = useRef<L.Map | null>(null);
+  const markerRef = useRef<L.Marker | null>(null);
+
   const { login } = useAuth();
   const navigate = useNavigate();
 
@@ -59,6 +75,68 @@ export default function RoleSelection() {
       navigate('/signup');
     }
   }, [navigate]);
+
+  useEffect(() => {
+    if (selectedRole !== 'driver') {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+        markerRef.current = null;
+        setPickedLocation(null);
+      }
+      return;
+    }
+
+    if (!mapContainerRef.current) return;
+    if (mapInstanceRef.current) {
+      setTimeout(() => mapInstanceRef.current?.invalidateSize(), 150);
+      return;
+    }
+
+    const map = L.map(mapContainerRef.current).setView([28.6139, 77.2090], 11);
+    mapInstanceRef.current = map;
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: '&copy; OpenStreetMap contributors',
+    }).addTo(map);
+
+    // Fetch existing drivers to show on map
+    getPublicDrivers().then(drivers => {
+      if (!mapInstanceRef.current) return;
+      
+      const truckIcon = L.divIcon({
+        className: "custom-marker bg-transparent border-none",
+        html: `<div style="background-color: #64748b; width: 24px; height: 24px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.8); display: flex; align-items: center; justify-content: center; opacity: 0.8;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2">
+            <path d="M1 3h15v13H1zM16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/>
+          </svg>
+        </div>`,
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+      });
+
+      drivers.forEach((d: any) => {
+        if (d.currentLocation?.lat && d.currentLocation?.lng) {
+           L.marker([d.currentLocation.lat, d.currentLocation.lng], { icon: truckIcon })
+             .bindTooltip("Existing Driver")
+             .addTo(map);
+        }
+      });
+    }).catch(err => console.error("Could not fetch public drivers", err));
+
+    map.on('click', (e: L.LeafletMouseEvent) => {
+      const { lat, lng } = e.latlng;
+      setPickedLocation({ lat, lng });
+      
+      if (markerRef.current) {
+        markerRef.current.setLatLng([lat, lng]);
+      } else {
+        markerRef.current = L.marker([lat, lng]).addTo(map);
+      }
+    });
+
+    setTimeout(() => map.invalidateSize(), 150);
+  }, [selectedRole]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -76,12 +154,19 @@ export default function RoleSelection() {
     try {
       const roleToSubmit = selectedRole;
       
-      const response = await apiSignup({
+      const payload: any = {
         name: email.split('@')[0],
         email,
         password,
         role: roleToSubmit as 'user' | 'driver'
-      });
+      };
+
+      if (roleToSubmit === 'driver' && pickedLocation) {
+        payload.lat = pickedLocation.lat;
+        payload.lng = pickedLocation.lng;
+      }
+
+      const response = await apiSignup(payload);
       
       localStorage.removeItem('waste_mgmt_temp_signup');
       login(response.token, response.user);
@@ -186,6 +271,18 @@ export default function RoleSelection() {
                 })}
               </div>
             </div>
+
+            {/* Map Picker for Driver */}
+            {selectedRole === 'driver' && (
+              <div style={{ animation: 'fadeInUp 0.3s ease', marginBottom: 24 }}>
+                <p style={{ fontSize: 13, fontWeight: 600, color: '#cbd5e1', marginBottom: 4 }}>Select Starting Base Location</p>
+                <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 12 }}>Click on the map to drop a pin. Grey markers are existing drivers. Try avoiding them to spread out your coverage!</div>
+                <div 
+                  ref={mapContainerRef} 
+                  style={{ width: '100%', height: 180, borderRadius: 12, border: '1px solid rgba(255,255,255,0.1)', cursor: 'crosshair', zIndex: 0 }}
+                ></div>
+              </div>
+            )}
 
             {/* Submit */}
             <button

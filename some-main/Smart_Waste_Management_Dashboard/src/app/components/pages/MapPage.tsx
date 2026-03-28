@@ -56,7 +56,7 @@ export default function MapPage() {
   const [complaints, setComplaints] = useState<any[]>([]);
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [routeOptimized, setRouteOptimized] = useState(false);
-  const [roadRoute, setRoadRoute] = useState<[number, number][]>([]);
+  const [roadRoutes, setRoadRoutes] = useState<{truckId: string; positions: [number, number][]; color: string}[]>([]);
 
   // REALTIME SOCKET LINK
   const { socket } = useSocket();
@@ -251,92 +251,135 @@ export default function MapPage() {
     return R * c;
   };
 
-  // Nearest neighbor route optimization
-  const calculateOptimizedRoute = (): [number, number][] => {
-    // 1. Collect all points that need visiting
-    const pointsToVisit: { lat: number, lng: number }[] = [];
-    
-    // Add full bins
-    filteredBins.filter(b => b.status === "full").forEach(b => {
-      pointsToVisit.push({ lat: b.lat, lng: b.lng });
-    });
+  // Multi-truck Nearest neighbor route optimization
+  const calculateAllOptimizedRoutes = (): { truckId: string, positions: [number, number][] }[] => {
+    // 1. Group points by truck
+    const truckPoints: Record<string, { lat: number; lng: number, type: string }[]> = {};
+    trucks.forEach(t => { truckPoints[String(t.id)] = []; });
 
-    // Add pending/assigned user requests
+    // 2. Assign tasks to trucks
     activeUserRequests.forEach(req => {
-      // If a specific truck is selected, ONLY route to tasks explicitly assigned to that driver
-      if (selectedTruck && req.assignedDriverId !== selectedTruck.id) {
-        return; // skip if unassigned or assigned to someone else
-      }
-      pointsToVisit.push({ lat: req.lat, lng: req.lng });
-    });
-
-    if (pointsToVisit.length === 0) return [];
-
-    // 2. Start from the selected truck if exists, else first active truck, else default center
-    let currentLat = selectedTruck ? selectedTruck.lat : (trucks.length > 0 ? trucks[0].lat : 28.6139);
-    let currentLng = selectedTruck ? selectedTruck.lng : (trucks.length > 0 ? trucks[0].lng : 77.2090);
-
-    const optimizedRoute: [number, number][] = [[currentLat, currentLng]]; // starting point
-
-    // 3. Keep finding the nearest unvisited point
-    while (pointsToVisit.length > 0) {
-      let nearestIdx = 0;
-      let minDistance = Infinity;
-
-      for (let i = 0; i < pointsToVisit.length; i++) {
-        const d = calculateDistance(currentLat, currentLng, pointsToVisit[i].lat, pointsToVisit[i].lng);
-        if (d < minDistance) {
-          minDistance = d;
-          nearestIdx = i;
+      // If assigned to a specific truck, add it there
+      if (req.assignedDriverId && truckPoints[String(req.assignedDriverId)]) {
+        truckPoints[String(req.assignedDriverId)].push({ lat: req.lat, lng: req.lng, type: 'task' });
+      } else {
+        // If unassigned, assign to nearest truck
+        if (trucks.length > 0) {
+          let minDist = Infinity, nearestTruckId = trucks[0].id;
+          trucks.forEach(t => {
+            const d = calculateDistance(t.lat, t.lng, req.lat, req.lng);
+            if (d < minDist) { minDist = d; nearestTruckId = t.id; }
+          });
+          truckPoints[String(nearestTruckId)].push({ lat: req.lat, lng: req.lng, type: 'task' });
         }
       }
+    });
 
-      // Move to the nearest point
-      const nextPoint = pointsToVisit[nearestIdx];
-      optimizedRoute.push([nextPoint.lat, nextPoint.lng]);
-      
-      currentLat = nextPoint.lat;
-      currentLng = nextPoint.lng;
+    // 3. Assign full bins to nearest trucks
+    filteredBins.filter(b => b.status === "full").forEach(b => {
+      if (trucks.length > 0) {
+        let minDist = Infinity, nearestTruckId = trucks[0].id;
+        trucks.forEach(t => {
+          const d = calculateDistance(t.lat, t.lng, b.lat, b.lng);
+          if (d < minDist) { minDist = d; nearestTruckId = t.id; }
+        });
+        if (truckPoints[String(nearestTruckId)]) {
+          truckPoints[String(nearestTruckId)].push({ lat: b.lat, lng: b.lng, type: 'bin' });
+        }
+      }
+    });
 
-      // Remove visited point
-      pointsToVisit.splice(nearestIdx, 1);
-    }
+    // 4. For each truck, compute TSP sequence
+    const optimizedTruckRoutes: { truckId: string, positions: [number, number][] }[] = [];
 
-    return optimizedRoute;
+    trucks.forEach(truck => {
+      const points = truckPoints[String(truck.id)];
+      if (!points || points.length === 0) return;
+
+      let currentLat = truck.lat;
+      let currentLng = truck.lng;
+      const route: [number, number][] = [[currentLat, currentLng]];
+
+      // A copy to mutate
+      const pointsToVisit = [...points];
+
+      while (pointsToVisit.length > 0) {
+        let nearestIdx = 0;
+        let minDistance = Infinity;
+
+        for (let i = 0; i < pointsToVisit.length; i++) {
+          const d = calculateDistance(currentLat, currentLng, pointsToVisit[i].lat, pointsToVisit[i].lng);
+          if (d < minDistance) {
+            minDistance = d;
+            nearestIdx = i;
+          }
+        }
+
+        const nextPoint = pointsToVisit[nearestIdx];
+        route.push([nextPoint.lat, nextPoint.lng]);
+
+        currentLat = nextPoint.lat;
+        currentLng = nextPoint.lng;
+
+        pointsToVisit.splice(nearestIdx, 1);
+      }
+
+      optimizedTruckRoutes.push({ truckId: String(truck.id), positions: route });
+    });
+
+    return optimizedTruckRoutes;
   };
 
-  // Compute optimized route only if toggled
-  const combinedRoute = routeOptimized ? calculateOptimizedRoute() : [];
-  const combinedRouteKey = combinedRoute.map(([lat, lng]) => `${lat},${lng}`).join("|");
+  // Compute optimized routes only if toggled
+  const allTruckRoutes = routeOptimized ? calculateAllOptimizedRoutes() : [];
+  const allRoutesKey = allTruckRoutes.map(r => `${r.truckId}:` + r.positions.map(([lat, lng]) => `${lat},${lng}`).join("|")).join("||");
 
   // Fetch a road-following route geometry from OSRM for the optimized stop order.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (!routeOptimized || combinedRoute.length < 2) {
-        if (!cancelled) setRoadRoute([]);
+      if (!routeOptimized || allTruckRoutes.length === 0) {
+        if (!cancelled) setRoadRoutes([]);
         return;
       }
 
-      try {
-        const res = await getRoadRoute(combinedRoute);
-        if (!cancelled) setRoadRoute(res.geometry);
-      } catch {
-        // Fallback to straight line between stops if routing service is unavailable.
-        if (!cancelled) setRoadRoute(combinedRoute);
+      const newRoadRoutes: typeof roadRoutes = [];
+      const colors = ["#EF4444", "#3B82F6", "#10B981", "#F59E0B", "#8B5CF6", "#EC4899", "#14B8A6"];
+
+      // Fetch road routes concurrently
+      await Promise.all(allTruckRoutes.map(async (truckRoute, idx) => {
+        if (truckRoute.positions.length < 2) return;
+        try {
+          const res = await getRoadRoute(truckRoute.positions);
+          newRoadRoutes.push({
+            truckId: truckRoute.truckId,
+            positions: res.geometry,
+            color: colors[idx % colors.length]
+          });
+        } catch {
+          // Fallback to straight line between stops if routing service is unavailable.
+          newRoadRoutes.push({
+            truckId: truckRoute.truckId,
+            positions: truckRoute.positions,
+            color: colors[idx % colors.length]
+          });
+        }
+      }));
+
+      if (!cancelled) {
+        setRoadRoutes(newRoadRoutes);
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [routeOptimized, combinedRouteKey]);
+  }, [routeOptimized, allRoutesKey]);
 
-  // Single route only (no static demo lines).
-  const routes =
-    routeOptimized && roadRoute.length > 1
-      ? [{ positions: roadRoute, color: "#EF4444", type: "optimized-route" }]
-      : [];
+  // Aggregate routes for Leaflet
+  const routes = roadRoutes
+    .filter(r => selectedTruck ? r.truckId === String(selectedTruck.id) : true)
+    .map(r => ({ positions: r.positions, color: r.color, type: "optimized-route" }));
 
   if (isLoading) {
     return (
@@ -648,27 +691,29 @@ export default function MapPage() {
           </div>
 
           {/* Route Info */}
-          {routeOptimized && combinedRoute.length > 0 && (
+          {routeOptimized && roadRoutes.length > 0 && (
             <div className="mt-3 p-4 bg-gradient-to-r from-[#9C27B0]/20 to-purple-900/10 border border-[#9C27B0]/50 rounded-xl shadow-lg border-l-4 border-l-[#9C27B0] animate-fade-in relative overflow-hidden">
               <div className="absolute -right-4 -top-4 opacity-10">
                  <Navigation className="w-24 h-24 text-white" />
               </div>
               <div className="flex items-center gap-2 mb-2 relative z-10">
                 <Navigation className="h-5 w-5 text-[#E040FB]" />
-                <span className="text-sm font-bold text-white tracking-widest uppercase">Smart Route Active</span>
+                <span className="text-sm font-bold text-white tracking-widest uppercase">Smart Routes Active</span>
               </div>
               <p className="text-xs text-[#E1BEE7] mb-3 leading-relaxed relative z-10 font-medium">
-                The map is now displaying the most efficient path connecting all <strong>Full Bins</strong> and pending <strong>Citizen Requests</strong>.
+                The map is now displaying independent efficient paths for each truck, connecting nearby <strong>Full Bins</strong> and assigned <strong>Citizen Requests</strong>.
               </p>
               <div className="bg-[#0F3D2E]/50 rounded-lg p-2 flex justify-around items-center text-xs relative z-10 border border-[#1F7A63]">
                   <div className="text-center">
-                    <span className="block text-[#B0BEC5] mb-1">Pickups</span>
-                    <span className="text-white font-black text-lg">{combinedRoute.length - 1}</span>
+                    <span className="block text-[#B0BEC5] mb-1">Active Trucks</span>
+                    <span className="text-white font-black text-lg">{roadRoutes.length}</span>
                   </div>
                   <div className="w-px h-8 bg-[#1F7A63]"></div>
                   <div className="text-center">
-                    <span className="block text-[#B0BEC5] mb-1">Est. Time</span>
-                    <span className="text-emerald-400 font-black text-lg">{Math.max(15, (combinedRoute.length - 1) * 8)}m</span>
+                    <span className="block text-[#B0BEC5] mb-1">Total Stops</span>
+                    <span className="text-emerald-400 font-black text-lg">
+                      {allTruckRoutes.reduce((acc, route) => acc + Math.max(0, route.positions.length - 1), 0)}
+                    </span>
                   </div>
               </div>
             </div>

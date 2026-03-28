@@ -28,15 +28,23 @@ const signup = async (req, res) => {
 
     // If driver, create a Driver profile
     if (userRole === 'driver') {
-      const baseLat = 28.4595;
-      const baseLng = 77.0266;
-      // random offset roughly within ~5km (+/- 0.05 degrees)
-      const randomLat = baseLat + (Math.random() - 0.5) * 0.1;
-      const randomLng = baseLng + (Math.random() - 0.5) * 0.1;
+      let finalLat, finalLng;
+      
+      if (req.body.lat !== undefined && req.body.lng !== undefined) {
+        // Use manually provided coordinates from the Map Picker
+        finalLat = parseFloat(req.body.lat);
+        finalLng = parseFloat(req.body.lng);
+      } else {
+        // Fallback to random offset roughly within ~5km (+/- 0.05 degrees)
+        const baseLat = 28.4595;
+        const baseLng = 77.0266;
+        finalLat = baseLat + (Math.random() - 0.5) * 0.1;
+        finalLng = baseLng + (Math.random() - 0.5) * 0.1;
+      }
       
       await Driver.create({ 
         userId: user._id,
-        currentLocation: { lat: randomLat, lng: randomLng }
+        currentLocation: { lat: finalLat, lng: finalLng }
       });
     }
 
@@ -81,4 +89,14 @@ const login = async (req, res) => {
   }
 };
 
-module.exports = { signup, login };
+// GET /api/auth/public-drivers
+const getPublicDrivers = async (req, res) => {
+  try {
+    const drivers = await Driver.find().select('currentLocation');
+    res.json(drivers);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+module.exports = { signup, login, getPublicDrivers };

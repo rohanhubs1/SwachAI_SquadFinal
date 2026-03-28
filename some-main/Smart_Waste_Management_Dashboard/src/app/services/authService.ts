@@ -5,6 +5,8 @@ export interface SignupData {
   email: string;
   password: string;
   role: 'user' | 'driver';
+  lat?: number;
+  lng?: number;
 }
 
 export interface LoginData {
@@ -29,5 +31,10 @@ export const signup = async (data: SignupData): Promise<AuthResponse> => {
 
 export const login = async (data: LoginData): Promise<AuthResponse> => {
   const res = await api.post('/auth/login', data);
+  return res.data;
+};
+
+export const getPublicDrivers = async (): Promise<{_id: string, currentLocation: {lat: number, lng: number}}[]> => {
+  const res = await api.get('/auth/public-drivers');
   return res.data;
 };

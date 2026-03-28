@@ -84,7 +84,16 @@ const updateDriverShiftStatus = async (req, res) => {
 // GET /api/driver/shift
 const getDriverShiftStatus = async (req, res) => {
   try {
-    const driver = await Driver.findOne({ userId: req.user._id }).select('shiftStatus truckType currentLocation');
+    let driver = await Driver.findOne({ userId: req.user._id }).select('shiftStatus truckType currentLocation');
+    
+    // Auto-recovery for corrupted profiles (if User exists but Driver doesn't)
+    if (!driver) {
+      driver = await Driver.create({
+        userId: req.user._id,
+        currentLocation: { lat: 28.6139 + (Math.random() - 0.5) * 0.1, lng: 77.2090 + (Math.random() - 0.5) * 0.1 }
+      });
+    }
+
     if (!driver) return res.status(404).json({ message: 'Driver profile not found' });
     res.json({ shiftStatus: driver.shiftStatus, truckType: driver.truckType || '', currentLocation: driver.currentLocation });
   } catch (error) {
